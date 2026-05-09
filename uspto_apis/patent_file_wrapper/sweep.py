@@ -203,7 +203,8 @@ def post_with_retry(
 
     The ODP enforces a per-API-key rate limit and answers HTTP 429 when it is
     exceeded. We also retry any 5xx and any low-level network exception.
-    Other 4xx errors (400, 401, 403, ...) are surfaced as `RuntimeError`
+    HTTP 404 with ODP's "no matching records" payload is treated as zero hits.
+    Other 4xx errors (400, 401, 403, ...) are surfaced as `UsptoApiError`
     immediately because they will not heal on retry.
 
     Back-off is exponential (`base_sleep * 2**attempt`) which doubles the
@@ -228,6 +229,21 @@ def post_with_retry(
 
         if r.status_code == 200:
             return r.json()
+        if r.status_code == 404:
+            # ODP answers HTTP 404 with a JSON body when a search has zero hits
+            # (instead of 200 with count=0). Treat that as an empty result set.
+            try:
+                err = r.json()
+            except ValueError:
+                raise UsptoApiError(
+                    r.status_code, f"USPTO API error {r.status_code}: {last_text}"
+                ) from None
+            detailed = (err.get("detailedMessage") or "").lower()
+            if "no matching records" in detailed:
+                return {"count": 0, "patentFileWrapperDataBag": []}
+            raise UsptoApiError(
+                r.status_code, f"USPTO API error {r.status_code}: {last_text}"
+            )
         if r.status_code == 429 or 500 <= r.status_code < 600:
             # 429 = rate limit hit; 5xx = transient server-side error.
             wait = base_sleep * (2**attempt)
